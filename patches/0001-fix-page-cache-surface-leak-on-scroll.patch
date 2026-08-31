@@ -1,0 +1,60 @@
+# Исправление утечки cairo-поверхностей при пролистывании PDF
+#
+# Файл: zathura/page-widget.c
+# База: zathura develop / 0.5.x (функции cb_cache_invalidated,
+#       draw_thumbnail_image, zathura_page_widget_update_view_time)
+#
+# Применение из корня исходников zathura:
+#   patch -p1 < patches/0001-fix-page-cache-surface-leak-on-scroll.patch
+#
+# Если контекст немного разъехался — правки точечные, их можно внести вручную
+# (см. REPORT.md, раздел «Исправление»).
+
+--- a/zathura/page-widget.c
++++ b/zathura/page-widget.c
+@@ -820,6 +820,8 @@
+   cairo_surface_t* thumbnail =
+       cairo_surface_create_similar(surface, CAIRO_CONTENT_COLOR, unscaled_width, unscaled_height);
+   if (cairo_surface_status(thumbnail) != CAIRO_STATUS_SUCCESS) {
++    /* cairo always returns a (possibly nil) surface that must be destroyed */
++    cairo_surface_destroy(thumbnail);
+     return NULL;
+   }
+ 
+@@ -918,11 +920,20 @@
+   g_return_if_fail(ZATHURA_IS_PAGE_WIDGET(widget));
+ 
+   ZathuraPageWidgetPrivate* priv = zathura_page_widget_get_instance_private(widget);
+-  if (zathura_page_widget_have_surface(widget) == true && priv->cached == true &&
+-      zathura_page_get_visibility(priv->page) == false) {
+-    /* The page was in the cache but got removed and is invisible, so get rid of
+-     * the surface. */
+-    zathura_page_widget_update_surface(widget, NULL, false);
++  if (zathura_page_widget_have_surface(widget) == true && priv->cached == true) {
++    /* Visibility lags behind layout (see page_widget_on_screen). If we skip
++     * the free here and then clear cached, the surface is leaked until the
++     * document is closed — this shows up when scrolling a PDF. */
++    const bool on_screen = page_widget_on_screen(GTK_WIDGET(widget));
++    if (on_screen == false) {
++      zathura_page_widget_update_surface(widget, NULL, false);
++    } else {
++      /* Still painted: drop the full-resolution bitmap, keep the thumbnail
++       * so GTK can draw something until the next render request. */
++      zathura_page_widget_update_surface(widget, NULL, true);
++    }
+   }
+   priv->cached = false;
+ }
+@@ -1365,6 +1376,12 @@
+   if (zathura_page_get_visibility(priv->page) == true) {
+     zathura_render_request_update_view_time(priv->render_request);
+   }
++  /* If the page left the viewport and is no longer in the render cache,
++   * drop the full-resolution surface. abort_render_request is not called
++   * on every scroll, so this is the path that actually runs while paging. */
++  if (priv->cached == false && page_widget_on_screen(GTK_WIDGET(widget)) == false) {
++    zathura_page_widget_update_surface(widget, NULL, false);
++  }
+   if (priv->surface == NULL) {
+     zathura_render_request(priv->render_request, g_get_real_time());
+   }
